@@ -1,10 +1,10 @@
 import logging
 import asyncio
-import threading
+import threading  # Импортируем модуль threading
 from datetime import datetime
 from typing import Dict, Set, Any
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, error
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,35 +14,33 @@ from telegram.ext import (
     filters,
 )
 
-# Настройки
+#Настройки
 TOKEN = "8461887435:AAEFLMXQzzVStz7jVmjLL0eCSaf2rxN0g9g"  # Замените на токен от @BotFather
 ADMIN_ID = 8473087607  # Ваш Telegram ID (можно узнать через @userinfobot)
 
-# База данных (в памяти для простоты)
+#База данных (в памяти для простоты)
 users: Dict[int, float] = {}  # user_id → balance
 blacklist: Set[int] = set()
 pending_payments: Dict[int, str] = {}  # user_id → payment_id
 
-# Логирование
+#Логирование
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
 
-
-# 1. Ежесекундное начисление баланса
+#1. Ежесекундное начисление баланса
 async def balance_incrementer(app: Application):
     while True:
         await asyncio.sleep(1)
-        for user_id in users:
+        for user_id in list(users.keys()):  # Итерируемся по копии ключей, чтобы избежать ошибок при изменении users
             if user_id not in blacklist:
                 users[user_id] += 0.01  # +0.01 ₽ в секунду
         logger.info("Балансы обновлены для всех активных пользователей.")
 
 
-
-# 2. Старт и приветствие
+#2. Старт и приветствие
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in blacklist:
@@ -54,28 +52,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Новый пользователь: {user_id}")
 
     await update.message.reply_text(
-        f"👋 Привет! Твой баланс: **{users[user_id]:.2f} ₽**\n\n"
-        "Используй /menu для управления."
+        f"👋 Привет! Твой баланс: {users[user_id]:.2f} ₽\n\n"
+        "Используй /menu для управления.",
+        parse_mode="MarkdownV2",  # Добавлено для форматирования
     )
 
 
-
-# 3. Главное меню
+#3. Главное меню
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in blacklist:
+        await update.message.reply_text("❌ Вы в чёрном списке.")
+        return
+
     keyboard = [
         [InlineKeyboardButton("💵 Пополнить баланс", callback_data="pay")],
         [InlineKeyboardButton("💰 Мой баланс", callback_data="balance")],
     ]
     # Добавляем админ-кнопку только для админа
-    if update.effective_user.id == ADMIN_ID:
+    if user_id == ADMIN_ID:
         keyboard.append([InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin")])
-    
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
 
 
-
-# 4. Обработка кнопок
+#4. Обработка кнопок
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()  # Подтверждаем получение callback
@@ -89,7 +91,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "balance":
-        await query.edit_message_text(f"💰 Твой баланс: **{users[user_id]:.2f} ₽**")
+        await query.edit_message_text(f"💰 Твой баланс: {users[user_id]:.2f} ₽", parse_mode="MarkdownV2") # Используем MarkdownV2
 
     elif data == "pay":
         # Генерируем QR-код для пополнения
@@ -111,22 +113,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"ID платежа: `{payment_id}`\n"
                 "После оплаты нажми /confirm"
             ),
+            parse_mode="MarkdownV2",  # Добавлено для форматирования
         )
 
     elif data == "admin" and user_id == ADMIN_ID:
-        await show_admin_panel(query, context)
+        await show_admin_panel(query.message, context) # Передаем query.message вместо query
 
     elif data == "back_to_menu":
         await menu(update, context)
 
     elif data == "admin_users":
-        await admin_users(query, context)
+        await admin_users(query.message)  # Передаем query.message
 
     elif data == "admin_blacklist":
-        await admin_blacklist(query, context)
+        await admin_blacklist(query.message) # Передаем query.message
 
     elif data == "admin_add_balance":
-        await admin_add_balance(query, context)
+        await admin_add_balance(query.message, context)  # Передаем query.message
 
     else:
         # Обработка неизвестных callback_data
@@ -134,10 +137,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(text="Неизвестное действие.", show_alert=True)
 
 
-
-
-# 5. Админ‑панель
-async def show_admin_panel(query):
+#5. Админ‑панель
+async def show_admin_panel(message, context): # Принимаем message
     count = len(users)
     banned = len(blacklist)
     total_balance = sum(users.values())
@@ -149,83 +150,80 @@ async def show_admin_panel(query):
         [InlineKeyboardButton("↩️ Назад", callback_data="back_to_menu")],
     ]
     text = (
-    "⚙️ *Админ‑панель*\n\n"
-    f"Всего пользователей: {count}\n"
-    f"В чёрном списке: {banned}\n"
-    f"Общий баланс: {total_balance:.2f} ₽"
-)
-try:
-    # Проверяем, что клавиатура не пустая
-    if not keyboard:
-        keyboard = [[]]  # Пустая клавиатура
+        "⚙️ Админ‑панель\n\n"
+        f"Всего пользователей: {count}\n"
+        f"В чёрном списке: {banned}\n"
+        f"Общий баланс: {total_balance:.2f} ₽"
+    )
 
-    # Избегаем отправки идентичного текста (может вызвать ошибку Telegram)
-    if query.message.text != text:
-        await query.edit_message_text(
-            text=text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="MarkdownV2"  # Используем актуальный режим
-        )
-    else:
-        # Если текст не изменился, обновляем только клавиатуру
-        await query.edit_message_reply_markup(
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+    try:
+        # Проверяем, что клавиатура не пустая
+        if not keyboard:
+            keyboard = [[]]  # Пустая клавиатура
 
-except telegram.error.BadRequest as e:
-    if "Message is not modified" in str(e):
-        logger.debug("Сообщение не изменилось, пропуск редактирования")
-    else:
-        logger.error(f"Ошибка Telegram при редактировании сообщения: {e}")
+        # Избегаем отправки идентичного текста (может вызвать ошибку Telegram)
+        if message.text != text:
+            await message.edit_text(
+                text=text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="MarkdownV2",  # Используем актуальный режим
+            )
+        else:
+            # Если текст не изменился, обновляем только клавиатуру
+            await message.edit_reply_markup(
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
 
-except telegram.error.NotFound:
-    logger.error("Сообщение не найдено (возможно, удалено)")
+    except telegram.error.BadRequest as e:
+        if "Message is not modified" in str(e):
+            logger.debug("Сообщение не изменилось, пропуск редактирования")
+        else:
+            logger.error(f"Ошибка Telegram при редактировании сообщения: {e}")
 
-except Exception as e:
-    logger.error(f"Неожиданная ошибка при редактировании сообщения: {e}")
+    except telegram.error.NotFound:
+        logger.error("Сообщение не найдено (возможно, удалено)")
+
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при редактировании сообщения: {e}")
 
 
-
-# 6. Управление пользователями (админ)
-async def admin_users(query):
-    text = "👥 *Список пользователей*:\n\n"
+#6. Управление пользователями (админ)
+async def admin_users(message): # Принимаем message
+    text = "👥 Список пользователей:\n\n"
     for uid, bal in users.items():
         status = "✅" if uid not in blacklist else "❌"
         text += f"{status} `{uid}` → {bal:.2f} ₽\n"
 
     keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data="admin")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2") # Используем message.edit_text
 
 
-
-# 7. Чёрный список (админ)
-async def admin_blacklist(query):
+#7. Чёрный список (админ)
+async def admin_blacklist(message): # Принимаем message
     if not blacklist:
         text = "🛑 Чёрный список пуст."
     else:
-        text = "🛑 *Чёрный список*:\n\n"
+        text = "🛑 Чёрный список:\n\n"
         for uid in blacklist:
             text += f"`{uid}`\n"
 
     keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data="admin")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2") # Используем message.edit_text
 
 
-
-# 8. Ручное пополнение (админ)
-async def admin_add_balance(query, context: ContextTypes.DEFAULT_TYPE):
-    await query.edit_message_text(
-        "➕ *Ручное пополнение*\n\n"
+#8. Ручное пополнение (админ)
+async def admin_add_balance(message, context: ContextTypes.DEFAULT_TYPE): # Принимаем message
+    await message.edit_text(
+        "➕ Ручное пополнение\n\n"
         "Отправьте в чат:\n"
         "`ID_пользователя сумма`\n\n"
         "Пример:\n`123456789 100`",
-        parse_mode="Markdown",
+        parse_mode="MarkdownV2",
     )
     context.user_data["expecting_admin_payment"] = True
 
 
-
-# 9. Подтверждение платежа пользователем
+#9. Подтверждение платежа пользователем
 async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in pending_payments:
@@ -239,8 +237,7 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Платёж подтверждён! +10.00 ₽")
 
 
-
-# 10. Обработка текстовых команд админа
+#10. Обработка текстовых команд админа
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
@@ -253,7 +250,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(parts) != 2:
                 await update.message.reply_text(
                     "❌ Неверный формат. Нужно: `ID_пользователя сумма`\n"
-                    "Пример: `123456789 100`"
+                    "Пример: `123456789 100`",
+                    parse_mode="MarkdownV2"
                 )
                 return
 
@@ -272,7 +270,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text(
                 f"✅ Пользователь {uid} пополнил баланс на {amount:.2f} ₽\n"
-                f"Новый баланс: {users[uid]:.2f} ₽"
+                f"Новый баланс: {users[uid]:.2f} ₽",
+                parse_mode="MarkdownV2"
             )
 
             # Сбрасываем флаг ожидания
@@ -280,10 +279,42 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         except ValueError:
             await update.message.reply_text(
-                "❌ Ошибка: убедитесь, что ID — целое число, а сумма — число с точкой (например, 100.50)."
+                "❌ Ошибка: убедитесь, что ID — целое число, а сумма — число с точкой (например, 100.50).",
+                parse_mode="MarkdownV2"
             )
         except Exception as e:
             await update.message.reply_text(f"❌ Произошла ошибка: {e}")
     else:
         # Если сообщение не относится к ожидаемой команде админа, можно проигнорировать или вывести подсказку
         await update.message.reply_text("Неизвестная команда. Используйте /menu для навигации.")
+
+
+def main():
+    application = Application.builder().token(TOKEN).build()
+
+    # Запускаем фоновый таск для начисления баланса
+    async def run_balance_incrementer():
+        await balance_incrementer(application)
+
+    # Используем threading, чтобы запустить асинхронную функцию в фоне
+    background_thread = threading.Thread(target=asyncio.run, args=(run_balance_incrementer(),), daemon=True)
+    background_thread.start()
+
+
+    # Обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", menu))  # Добавляем обработчик для /menu
+    application.add_handler(CommandHandler("confirm", confirm_payment)) # Добавляем обработчик для /confirm
+
+    # Обработчик кнопок
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    # Обработчик текстовых сообщений (для обработки команд админа)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
+    # Запускаем бота
+    application.run_polling()
+
+
+if __name__ == "__main__":
+    main()
